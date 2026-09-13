@@ -23,11 +23,14 @@ input int SlowMA = 20;                    // Slow MA period
 input int RSIPeriod = 14;                 // RSI Period
 input double RSIOverbought = 70;          // RSI Overbought level
 input double RSIOversold = 30;            // RSI Oversold level
-input ENUM_TIMEFRAME Timeframe = PERIOD_M1;  // Timeframe (M1/M5)
+input ENUM_TIMEFRAME TimeframeInput = PERIOD_M1;  // Timeframe (M1/M5)
 
 //--- Global variables
 double PointValue;
 int Digits_Adjust;
+int FastMAHandle;
+int SlowMAHandle;
+int RSIHandle;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -38,6 +41,18 @@ int OnInit()
     PointValue = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
     Digits_Adjust = (SymbolInfoInteger(_Symbol, SYMBOL_DIGITS) == 5 || 
                      SymbolInfoInteger(_Symbol, SYMBOL_DIGITS) == 3) ? 10 : 1;
+    
+    // Create indicator handles
+    FastMAHandle = iMA(_Symbol, TimeframeInput, FastMA, 0, MODE_EMA, PRICE_CLOSE);
+    SlowMAHandle = iMA(_Symbol, TimeframeInput, SlowMA, 0, MODE_EMA, PRICE_CLOSE);
+    RSIHandle = iRSI(_Symbol, TimeframeInput, RSIPeriod, PRICE_CLOSE);
+    
+    // Check if handles are valid
+    if (FastMAHandle == INVALID_HANDLE || SlowMAHandle == INVALID_HANDLE || RSIHandle == INVALID_HANDLE)
+    {
+        Print("Error creating indicator handles");
+        return(INIT_FAILED);
+    }
     
     // Initialize trade object
     trade.SetExpertMagicNumber(20240913);
@@ -54,14 +69,36 @@ int OnInit()
 void OnTick()
 {
     // Get market data
-    MqlRates rates[];
-    ArraySetAsSeries(rates, true);
-    CopyRates(_Symbol, Timeframe, 0, 50, rates);
+    double fastMABuffer[];
+    double slowMABuffer[];
+    double rsiBuffer[];
     
-    // Calculate indicators
-    double fastMA = iMA(_Symbol, Timeframe, FastMA, 0, MODE_EMA, PRICE_CLOSE, 0);
-    double slowMA = iMA(_Symbol, Timeframe, SlowMA, 0, MODE_EMA, PRICE_CLOSE, 0);
-    double rsi = iRSI(_Symbol, Timeframe, RSIPeriod, PRICE_CLOSE, 0);
+    ArraySetAsSeries(fastMABuffer, true);
+    ArraySetAsSeries(slowMABuffer, true);
+    ArraySetAsSeries(rsiBuffer, true);
+    
+    // Copy indicator data
+    if (CopyBuffer(FastMAHandle, 0, 0, 3, fastMABuffer) <= 0)
+    {
+        Print("Error copying Fast MA data");
+        return;
+    }
+    
+    if (CopyBuffer(SlowMAHandle, 0, 0, 3, slowMABuffer) <= 0)
+    {
+        Print("Error copying Slow MA data");
+        return;
+    }
+    
+    if (CopyBuffer(RSIHandle, 0, 0, 3, rsiBuffer) <= 0)
+    {
+        Print("Error copying RSI data");
+        return;
+    }
+    
+    double fastMA = fastMABuffer[0];
+    double slowMA = slowMABuffer[0];
+    double rsi = rsiBuffer[0];
     
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -84,8 +121,6 @@ void OnTick()
             OpenSellPosition(bid);
         }
     }
-    
-    // Exit Logic (handled by TP/SL)
 }
 
 //+------------------------------------------------------------------+
@@ -97,7 +132,10 @@ void OpenBuyPosition(double entryPrice)
     double tp = entryPrice + (TakeProfitPips * PointValue * Digits_Adjust);
     double sl = entryPrice - (StopLossPips * PointValue * Digits_Adjust);
     
-    trade.Buy(lot, _Symbol, entryPrice, sl, tp, "Scalping Buy");
+    if (lot > 0)
+    {
+        trade.Buy(lot, _Symbol, entryPrice, sl, tp, "Scalping Buy");
+    }
 }
 
 //+------------------------------------------------------------------+
@@ -109,7 +147,10 @@ void OpenSellPosition(double entryPrice)
     double tp = entryPrice - (TakeProfitPips * PointValue * Digits_Adjust);
     double sl = entryPrice + (StopLossPips * PointValue * Digits_Adjust);
     
-    trade.Sell(lot, _Symbol, entryPrice, sl, tp, "Scalping Sell");
+    if (lot > 0)
+    {
+        trade.Sell(lot, _Symbol, entryPrice, sl, tp, "Scalping Sell");
+    }
 }
 
 //+------------------------------------------------------------------+
@@ -119,7 +160,16 @@ double CalculateLotSize(int stopLossPips)
 {
     double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
     double riskAmount = accountBalance * (RiskPercent / 100.0);
-    double pipValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    
+    if (tickSize == 0 || tickValue == 0)
+    {
+        Print("Error: Invalid tick size or tick value");
+        return 0;
+    }
+    
+    double pipValue = tickValue / tickSize;
     double lot = riskAmount / (stopLossPips * pipValue);
     
     double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -128,7 +178,11 @@ double CalculateLotSize(int stopLossPips)
     
     lot = MathMax(lot, minLot);
     lot = MathMin(lot, maxLot);
-    lot = MathFloor(lot / stepLot) * stepLot;
+    
+    if (stepLot > 0)
+    {
+        lot = MathFloor(lot / stepLot) * stepLot;
+    }
     
     return lot;
 }
@@ -143,7 +197,8 @@ int CountOpenPositions()
     
     for (int i = total - 1; i >= 0; i--)
     {
-        if (PositionSelectByTicket(PositionGetTicket(i)))
+        ulong ticket = PositionGetTicket(i);
+        if (ticket > 0)
         {
             if (PositionGetString(POSITION_SYMBOL) == _Symbol &&
                 PositionGetInteger(POSITION_MAGIC) == 20240913)
@@ -165,7 +220,8 @@ bool HasOpenBuy()
     
     for (int i = total - 1; i >= 0; i--)
     {
-        if (PositionSelectByTicket(PositionGetTicket(i)))
+        ulong ticket = PositionGetTicket(i);
+        if (ticket > 0)
         {
             if (PositionGetString(POSITION_SYMBOL) == _Symbol &&
                 PositionGetInteger(POSITION_MAGIC) == 20240913 &&
@@ -188,7 +244,8 @@ bool HasOpenSell()
     
     for (int i = total - 1; i >= 0; i--)
     {
-        if (PositionSelectByTicket(PositionGetTicket(i)))
+        ulong ticket = PositionGetTicket(i);
+        if (ticket > 0)
         {
             if (PositionGetString(POSITION_SYMBOL) == _Symbol &&
                 PositionGetInteger(POSITION_MAGIC) == 20240913 &&
@@ -207,5 +264,13 @@ bool HasOpenSell()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+    // Release indicator handles
+    if (FastMAHandle != INVALID_HANDLE)
+        IndicatorRelease(FastMAHandle);
+    if (SlowMAHandle != INVALID_HANDLE)
+        IndicatorRelease(SlowMAHandle);
+    if (RSIHandle != INVALID_HANDLE)
+        IndicatorRelease(RSIHandle);
+    
     Print("Scalping EA Vol80 stopped");
 }
